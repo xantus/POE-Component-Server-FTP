@@ -1,0 +1,16 @@
+Revision history for Perl extension POE::Component::Server::FTP.
+
+0.02 Thu Feb 5 22:15:16 2004
+	- (PASV) Passive transfers work
+	- Anonymous login allow/deny
+	- (REST) resume added
+	- Cleaned up the code ALOT
+	- (ABOR) abort added
+	- (XMKD XRMD XPWD XCUP XCWD) added these commands, but they might
+	  not be tottaly rfc compliant
+	- Probably more...
+
+0.01 Sat Dec 1 15:19:32 2001
+	- original version; created by h2xs 1.1.1.4 with options
+	-XA -n POE::Component::Server::FTP
+
