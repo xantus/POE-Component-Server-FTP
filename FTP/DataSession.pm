@@ -479,6 +479,14 @@ sub _drop {
 	$heap->{send_done} = 1; # for send_stats, so it doesn't delay again
 	
 	return unless ($heap->{data});
+
+	if (ref($heap->{data}) eq 'POE::Wheel::SocketFactory') {
+		# never connected...
+		$kernel->call($heap->{c_session} => _write_log => 4 => "Still a SocketFactory in _drop");
+		$kernel->call($heap->{c_session} => _write_log => 3 => "Connection timed out");
+		delete $heap->{data};
+		return;
+	}
 	
 	# if we are fully flushed, go ahead and disconnect
 	if ($heap->{data}->get_driver_out_octets() == 0) {

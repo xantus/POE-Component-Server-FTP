@@ -8,7 +8,7 @@ package POE::Component::Server::FTP;
 ### TODO:
 ###  - Should the Limiting depend on the ip connected via PORT/PASV or
 ###		the control connection ip
-###  - More virus checking options
+###  - Change virus checking to postprocessing
 ###
 ### Copyright (c) 2001 Leslie Michael Orchard.  All Rights Reserved.
 ### This module is free software; you can redistribute it and/or
@@ -21,7 +21,7 @@ use strict;
 use warnings;
 
 our @ISA = qw(Exporter);
-our $VERSION = '0.05';
+our $VERSION = '0.06';
 
 use Socket;
 use Carp;
