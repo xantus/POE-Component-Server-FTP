@@ -1,9 +1,9 @@
 package POE::Component::Server::FTP::ControlFilter;
 
-######################################################################
+###########################################################################
 ### POE::Component::Server::FTP::ControlFilter
 ### L.M.Orchard (deus_x@pobox.com)
-### Modified by David Davis ( xantus@cpan.org )
+### David Davis (xantus@cpan.org)
 ###
 ### TODO:
 ### --
@@ -12,8 +12,8 @@ package POE::Component::Server::FTP::ControlFilter;
 ### This module is free software; you can redistribute it and/or
 ### modify it under the same terms as Perl itself.#
 ###
-### Changes Copyright (c) 2003 David Davis and Teknikill Software
-######################################################################
+### Changes Copyright (c) 2003-2004 David Davis and Teknikill Software
+###########################################################################
 
 use strict;
 
@@ -23,20 +23,20 @@ sub new {
 	my $class = shift;
 	my %args = @_;
 
-	bless {}, $class;
+	bless({}, $class);
 }
 
 sub get {
 	my ($self, $raw) = @_;
 	my @events = ();
-		
+	
 	foreach my $input (@$raw) {
 		$input =~ s/\n//g;
 		$input =~ s/\r//g;
 		DEBUG && print STDERR "<<< $input\n";
 		my ($cmd, @args) = split(/ /, $input);
 
-		push @events,	{ cmd => uc $cmd, args =>\@args };
+		push(@events, { cmd => uc $cmd, args =>\@args });
 	}
 	
 	return \@events;
@@ -44,17 +44,18 @@ sub get {
 
 sub put {
 	my ($self, $in) = @_;
-	my $out;
+	my @out = ();
 
 	foreach (@$in) {
-		push @$out, "$_\n";
+		DEBUG && print STDERR ">>> $_\n";
+		push(@out, "$_\n");
 	}
 		
-	return $out;
+	return \@out;
 }
 
 sub get_pending {
-	my($self)=@_;
+	my ($self) = @_;
 	warn ref($self)." does not support the get_pending() method\n";
 	return;
 }

@@ -1,45 +1,45 @@
 package POE::Component::Server::FTP::DataSession;
 
-######################################################################
+###########################################################################
 ### POE::Component::Server::FTP::DataSession
-### L.M.Orchard ( deus_x@pobox.com )
-### Modified by David Davis ( xantus@cpan.org )
+### L.M.Orchard (deus_x@pobox.com)
+### David Davis (xantus@cpan.org)
 ###
 ### TODO:
 ### -- POEify the data channel
 ### -- Move file seeking to Filesys::Virtual
+### -- get rid of *_limit and use params instead
 ###
 ### Copyright (c) 2001 Leslie Michael Orchard.  All Rights Reserved.
 ### This module is free software; you can redistribute it and/or
 ### modify it under the same terms as Perl itself.
 ###
-### Changes Copyright (c) 2003 David Davis and Teknikill Software
-######################################################################
+### Changes Copyright (c) 2003-2004 David Davis and Teknikill Software
+###########################################################################
 
 use strict;
-
-use IO::Scalar;
 use IO::Socket::INET;
+use IO::Scalar;
 use POE qw(Session Wheel::ReadWrite Filter::Stream Driver::SysRW Wheel::SocketFactory);
+use Time::HiRes qw(time);
 
 use Data::Dumper;
-
-sub DEBUG { 0 }
 
 # Create a new DataSession
 
 sub new {
-	my ($type, $opt) = @_;
+	my ($type, $para, $opt) = @_;
 	my $self = bless { }, $type;
 
-	POE::Session->create(
+	my $ses = POE::Session->create(
 		 #options =>{ trace=>1 },
-		 args => [ $opt ],
+		 args => [ $para, $opt ],
 		 object_states => [
 			$self => {
 				_start			=> '_start',
 				_stop			=> '_stop',
 
+				_drop			=> '_drop',
 				start_LIST		=> 'start_LIST',
 				start_NLST		=> 'start_NLST',
 				start_STOR		=> 'start_STOR',
@@ -53,6 +53,8 @@ sub new {
 				data_error		=> 'data_error',
 				data_throttle	=> 'data_throttle',
 				data_resume		=> 'data_resume',
+				
+				stop_socket		=> 'stop_socket',
 
 				_sock_up		=> '_sock_up',
 				_sock_down		=> '_sock_down',
@@ -60,20 +62,28 @@ sub new {
 		],
 	);
 
-	undef;
+	return $ses->ID;
 }
 
 sub _start {
-	my ($kernel, $heap, $opt) = @_[KERNEL, HEAP, ARG0];
+	my ($kernel, $heap, $para, $opt) = @_[KERNEL, HEAP, ARG0, ARG1];
 
 # generating a port num
 #	my $x = pack('n',$port);
 #	my $p1 = ord(substr($x,0,1));
 #	my $p2 = ord(substr($x,1,1));
 
+	$heap->{send_rec_okay} = 0;
 	$heap->{listening} = 0;
+	$heap->{rest} = 0;
+	$heap->{total_bytes} = 0;
+	$heap->{bps} = 0;
+	$heap->{type} = 'dl'; # default to download
+	$heap->{c_session} = $_[SENDER]->ID;
+	%{$heap->{params}} = %{$para};
 
 	if ($opt->{data_port}) {
+		$kernel->call($heap->{c_session} => _write_log => 4 => "starting a PORT data session");
 		# PORT command
 		my ($h1, $h2, $h3, $h4, $p1, $p2) = split(',', $opt->{data_port});
 
@@ -92,8 +102,9 @@ sub _start {
 		);
 
 		$heap->{cmd} = $opt->{cmd};
-		$heap->{rest} = $opt->{rest};
+		$heap->{rest} = $opt->{rest} if ($opt->{rest});
 	} else {
+		$kernel->call($heap->{c_session} => _write_log => 4 => "starting a PASV data session");
 		# PASV command
 		$heap->{port} = ($opt->{port1}<<8)+$opt->{port2};
 		
@@ -105,7 +116,7 @@ sub _start {
 			SocketDomain   => AF_INET, # Sets the socket() domain
 			SocketType     => SOCK_STREAM, # Sets the socket() type
 			SocketProtocol => 'tcp', # Sets the socket() protocol
-			Reuse          => 'on', # Lets the port be reused
+			Reuse          => 'off', # Lets the port be reused
 		);
 
 		$heap->{listening} = 1;
@@ -121,10 +132,10 @@ sub _start {
 sub _sock_up {
 	my ($kernel, $heap, $socket) = @_[KERNEL, HEAP, ARG0];
 
-	my $buffer_max = 8 * 1024;
+	my $buffer_max = 4 * 1024;
 	my $buffer_min = 128;
 
-	$heap->{data} = new POE::Wheel::ReadWrite(
+	$heap->{data} = POE::Wheel::ReadWrite->new(
 		Handle			=> $socket,
 		Driver			=> POE::Driver::SysRW->new(),
 		Filter			=> POE::Filter::Stream->new(),
@@ -136,25 +147,20 @@ sub _sock_up {
 		HighEvent		=> 'data_throttle',
 		LowEvent		=> 'data_resume',
 	);
-	# remote_ip??
 
 	if ($heap->{listening} == 0) {
-		DEBUG && print "Data session started for $heap->{cmd}($heap->{opt})\n";
+		$kernel->call($heap->{c_session} => _write_log => 4 => "data session started for $heap->{cmd} ($heap->{opt})");
 		$kernel->yield('start_'.(uc $heap->{cmd}), $heap->{opt});
 	} else {
-		DEBUG && print "Received connection from $heap->{remote_ip}\n";
+		# TODO check if correct IP connected if that option is on
+		$kernel->call($heap->{c_session} => _write_log => 4 => "received connection from $heap->{remote_ip}");
 	}
 }
 
 sub _sock_down {
-	DEBUG && print "socket down\n";
-	delete $_[HEAP]->{data};
-}
-
-sub start_PASV {
-	my ($kernel, $heap, $dirfile) = @_[KERNEL, HEAP, ARG0];
-	my $fs = $heap->{filesystem};
-
+	my ($kernel, $heap) = @_[KERNEL, HEAP];
+	$kernel->call($heap->{c_session} => _write_log => 4 => "socket down");
+	delete $heap->{data};
 }
 
 sub start_LIST {
@@ -168,7 +174,8 @@ sub start_LIST {
 
 	$heap->{input_fh} = IO::Scalar->new(\$out);
 	$heap->{send_done} = 0;
-	$heap->{send_okay} = 1;
+	$heap->{send_rec_okay} = 1;
+	$kernel->yield('execute');
 }
 
 sub start_NLST {
@@ -182,35 +189,39 @@ sub start_NLST {
 
 	$heap->{input_fh} = IO::Scalar->new(\$out);
 	$heap->{send_done} = 0;
-	$heap->{send_okay} = 1;
+	$heap->{send_rec_okay} = 1;
+	$kernel->yield('execute');
 }
 
 sub start_RETR {
-	my ($kernel, $heap, $fh, $rest) = @_[KERNEL, HEAP, ARG0, ARG1];
+	my ($kernel, $heap, $fh, $opt) = @_[KERNEL, HEAP, ARG0, ARG1];
 
-	if (defined $rest) {
-		$heap->{rest} = $rest;
+	if (defined $opt->{rest}) {
+		$heap->{rest} = $opt->{rest};
 	}
 	
 	$heap->{input_fh} = $fh;
-	DEBUG && print "Seeking to $heap->{rest}\n";
 	seek($fh,$heap->{rest},0);
 	
 	$heap->{send_done} = 0;
-	$heap->{send_okay} = 1;
+	$heap->{send_rec_okay} = 1;
+	$kernel->yield('execute');
 }
 
 sub start_STOR {
-	my ($heap, $fh, $rest) = @_[HEAP, ARG0, ARG1];
-	
-	if (defined $rest) {
-		$heap->{rest} = $rest;
+	my ($kernel, $heap, $fh, $opt) = @_[KERNEL, HEAP, ARG0, ARG1];
+
+	if (defined $opt->{rest}) {
+		$heap->{rest} = $opt->{rest};
 	}
 	
 	$heap->{output_fh} = $fh;
 	
-	DEBUG && print "Seeking to $heap->{rest}\n";
 	seek($fh,$heap->{rest},0);
+	$heap->{type} = 'ul';
+	$heap->{send_rec_okay} = 1;
+	$heap->{xfer_time} = time();
+	$kernel->yield('execute');
 }
 
 sub _stop {
@@ -221,12 +232,26 @@ sub _stop {
 # Execute the session's pending upload
 
 sub execute {
-	if (defined $_[HEAP]->{input_fh}) {
-		$_[KERNEL]->yield('data_send');
-	} elsif (!defined $_[HEAP]->{output_fh}) {
-		if ($_[HEAP]->{listening} == 0) {
-			delete $_[HEAP]->{data};
+	my ($kernel, $heap, $session) =	@_[KERNEL, HEAP, SESSION];
+	
+	if (defined $heap->{input_fh}) {
+		$heap->{xfer_time} = time();
+		$kernel->yield('data_send');
+	} elsif (!defined $heap->{output_fh}) {
+		if ($heap->{listening} == 0) {
+			$kernel->call($session->ID => '_drop');
 		}
+	}
+}
+
+sub stop_socket {
+	my ($kernel, $session, $heap) =	@_[KERNEL, SESSION, HEAP];
+	
+	delete $heap->{time_out};
+	
+	if (ref($heap->{data}) eq 'POE::Wheel::SocketFactory') {
+		# still a factory?! Time to drop connection
+		delete $heap->{data};
 	}
 }
 
@@ -236,15 +261,48 @@ sub data_send {
 	my ($kernel, $session, $heap) =	@_[KERNEL, SESSION, HEAP];
 
 	if ( (!defined $heap->{input_fh}) || (! ref $heap->{input_fh} ) ) {
-		delete $heap->{data};
-	} elsif ($heap->{send_okay} && (defined $heap->{data})) {
+		$kernel->call($session->ID => '_drop');
+	} elsif ($heap->{send_rec_okay} && (defined $heap->{data})) {
+		
+		# if we haven't connected yet, then data will still be a factory
+		if (ref($heap->{data}) eq 'POE::Wheel::SocketFactory') {
+			$kernel->call($heap->{c_session} => _write_log => 4 => "data is still a SocketFactory (not connected yet?)");
+			if (defined $heap->{time_out}) {
+				$heap->{time_out} = $kernel->delay_set(stop_socket => 30);
+			}
+			$kernel->delay('data_send' => 1);
+			return;
+		}
+		
+		if (defined $heap->{time_out}) {
+			$kernel->alarm_remove($heap->{time_out});
+			delete $heap->{time_out};
+		}
+		
+		$heap->{bps} = ($heap->{total_bytes} / (time() - $heap->{xfer_time}));
+		
+		if ($heap->{params}{'DownloadLimit'} > 0) {
+			if ($heap->{params}{'LimitSceme'} eq 'ip') {	
+				if ($kernel->call($heap->{params}{'Alias'} => _bw_limit => 'dl' => $heap->{remote_ip} => $heap->{bps})) {
+					$kernel->yield('data_send');
+					return;
+				}
+			} else {
+				if ($heap->{bps} > $heap->{params}{'DownloadLimit'}) {
+					$kernel->yield('data_send');
+					return;
+				}
+			}		
+		}
+		
 		### Read in a block from the file.
 		my $buf;
 		my $len = $heap->{input_fh}->read($buf, $heap->{block_size});
 
 		### If something was read, queue it to be sent, and yield
-		### back for another send_block.
+		### back for another data_send.
 		if ($len > 0) {
+			$heap->{total_bytes} += $len;
 			$heap->{data}->put($buf);
 			$kernel->yield('data_send');
 		} else {
@@ -253,12 +311,7 @@ sub data_send {
 			$fs->close_read($heap->{input_fh});
 			delete $heap->{input_fh};
 
-			### Thanks, poe.perl.org!
-			if ($heap->{data}->get_driver_out_octets() == 0) {
-				delete $heap->{data};
-			} else {
-				$heap->{send_done} = 1;
-			}
+			$kernel->call($session->ID => '_drop');
 		}
 	}
 }
@@ -266,22 +319,63 @@ sub data_send {
 # Recieve a block from the remote client
 
 sub data_receive {
-	if ($_[HEAP]->{output_fh}) {
-		$_[HEAP]->{output_fh}->print($_[ARG0]);
-	} else {
-		delete $_[HEAP]->{data};
+	my ($kernel, $heap, $session, $data) = @_[KERNEL, HEAP, SESSION, ARG0];
+
+	if ( (!defined $heap->{output_fh}) || (! ref $heap->{output_fh} ) ) {
+		$kernel->call($session->ID => '_drop');
+	} elsif ($heap->{send_rec_okay} && (defined $heap->{data})) {
+		
+		# if we haven't connected yet, then data will still be a factory
+		if (ref($heap->{data}) eq 'POE::Wheel::SocketFactory') {
+			$kernel->call($heap->{c_session} => _write_log => 4 => "data is still a SocketFactory (not connected yet?)");
+			if (defined $heap->{time_out}) {
+				$heap->{time_out} = $kernel->delay_set(stop_socket => 30);
+			}
+			$kernel->delay('data_receive' => 1, $data);
+			return;
+		}
+		
+		if (defined $heap->{time_out}) {
+			$kernel->alarm_remove($heap->{time_out});
+			delete $heap->{time_out};
+		}
+		
+		$heap->{bps} = ($heap->{total_bytes} / (time() - $heap->{xfer_time}));
+		
+		if ($heap->{params}{'UploadLimit'} > 0) {
+			if ($heap->{params}{'LimitSceme'} eq 'ip') {
+				if ($kernel->call($heap->{params}{'Alias'} => _bw_limit => 'ul' => $heap->{remote_ip} => $heap->{bps})) {
+					$kernel->yield('data_receive');
+					$heap->{data}->pause_input();
+				} else {
+					$heap->{data}->resume_input();
+				}
+			} else {
+				if ($heap->{bps} > $heap->{params}{'UploadLimit'}) {
+					$kernel->yield('data_receive');
+					$heap->{data}->pause_input();
+				} else {
+					$heap->{data}->resume_input();
+				}
+			}
+		}
+		
+		if (defined $data) {			
+			$heap->{total_bytes} += length($data);
+			
+			$heap->{output_fh}->print($data);
+		}
 	}
 }
 
 sub data_error {
-	my ($heap, $operation, $errnum, $errstr) = @_[HEAP, ARG0, ARG1, ARG2];
+	my ($kernel, $heap, $operation, $errnum, $errstr) = @_[KERNEL, HEAP, ARG0, ARG1, ARG2];
 	my $fs = $heap->{filesystem};
 
 	if ($errnum) {
-		DEBUG && print "Session with $heap->{remote_ip} : $heap->{port} ".
-		"encountered $operation error $errnum: $errstr\n";
+		$kernel->call($heap->{c_session} => _write_log => 4 => "session with $heap->{remote_ip} : $heap->{port} encountered $operation error $errnum: $errstr");
 	} else {
-		DEBUG && print "Client at $heap->{remote_ip} : $heap->{port} disconnected\n";
+		$kernel->call($heap->{c_session} => _write_log => 4 => "client at $heap->{remote_ip} : $heap->{port} disconnected");
 	}
 
 	# either way, stop this session
@@ -299,16 +393,35 @@ sub data_error {
 }
 
 sub data_flushed {
-	delete $_[HEAP]->{data} if ($_[HEAP]->{send_done});
+	my ($kernel, $heap) = @_[KERNEL, HEAP];
+	if ($heap->{send_done}) {
+		$kernel->call($heap->{c_session} => _write_log => 4 => "data flushed, dropping connection");
+		delete $heap->{data};
+	}
 }
 
 sub data_throttle {
-	$_[HEAP]->{okay_to_send} = 0;
+	$_[HEAP]->{send_rec_okay} = 0;
 }
 
 sub data_resume {
-	$_[HEAP]->{okay_to_send} = 1;
+	$_[HEAP]->{send_rec_okay} = 1;
 	$_[KERNEL]->yield('data_send');
 }
 
+sub _drop {
+	my ($kernel, $heap) = @_[KERNEL, HEAP];
+	
+	return unless ($heap->{data});
+	
+	# if we are fully flushed, go ahead and disconnect
+	if ($heap->{data}->get_driver_out_octets() == 0) {
+		$kernel->call($heap->{c_session} => _write_log => 4 => "data finished, dropping connection");
+		delete $heap->{data};
+	} else {
+		# if not, then we set a flag and the flushed event
+		# drops the connection
+		$heap->{send_done} = 1;
+	}
+}
 1;

@@ -5,6 +5,9 @@ WriteMakefile(
     'NAME'		=> 'POE::Component::Server::FTP',
     'VERSION_FROM'	=> 'FTP.pm', # finds $VERSION
     'PREREQ_PM'		=> {
-			   Filesys::Virtual => 0.02
+			   Filesys::Virtual => 0.03,
+			   IO::Scalar => undef,
+			   IO::Socket::INET => undef,
+			   Socket => undef,
 	},
 );

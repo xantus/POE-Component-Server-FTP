@@ -1,5 +1,15 @@
 Revision history for Perl extension POE::Component::Server::FTP.
 
+0.04 Mon Feb 16 16:19:48 2004
+	- Fixed a nasty bug that involved the data session disconnecting early
+	- Bandwidth limiting added (upload and download), you can choose by ip or by connection
+	- Options added: LimitSceme (ip/per), DownloadLimit (bytes), UploadLimit (bytes)
+	- Forking isn't working yet (Wheel::Run)
+	- Logging has improved. Added an option (LogLevel) (1-4)
+	- Added SIZE command
+	- Added SITE CHMOD (some clients add SITE for some reason
+	- Added a timeout (option TimeOut (seconds))
+
 0.03 Thu Feb 5 23:32:45 2004
 	- oops, fixed hardcoded ip for pasv
 
