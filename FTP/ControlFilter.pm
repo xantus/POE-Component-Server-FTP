@@ -29,7 +29,7 @@ sub new {
 sub get {
 	my ($self, $raw) = @_;
 	my @events = ();
-	
+
 	foreach my $input (@$raw) {
 		$input =~ s/\n//g;
 		$input =~ s/\r//g;
@@ -38,7 +38,7 @@ sub get {
 
 		push(@events, { cmd => uc $cmd, args =>\@args });
 	}
-	
+
 	return \@events;
 }
 
@@ -50,7 +50,7 @@ sub put {
 		DEBUG && print STDERR ">>> $_\n";
 		push(@out, "$_\n");
 	}
-		
+
 	return \@out;
 }
 

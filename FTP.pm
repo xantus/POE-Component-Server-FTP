@@ -6,6 +6,9 @@ package POE::Component::Server::FTP;
 ### David Davis (xantus@cpan.org)
 ###
 ### TODO:
+###  - Should the Limiting depend on the ip connected via PORT/PASV or
+###		the control connection ip
+###  - More virus checking options
 ###
 ### Copyright (c) 2001 Leslie Michael Orchard.  All Rights Reserved.
 ### This module is free software; you can redistribute it and/or
@@ -18,7 +21,7 @@ use strict;
 use warnings;
 
 our @ISA = qw(Exporter);
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 
 use Socket;
 use Carp;
@@ -46,17 +49,21 @@ sub spawn {
 		args => [ \%params ],
 		package_states => [
 			'POE::Component::Server::FTP' => {
-				_start			=> '_start',
-				_stop			=> '_stop',
-				_write_log		=> '_write_log',
-				accept			=> 'accept',
-				accept_error	=> 'accept_error',
-				signals			=> 'signals',
-				_bw_limit		=> '_bw_limit',
-				_dcon_cleanup	=> '_dcon_cleanup',
-				cmd_stdout		=> 'cmd_stdout',
-				cmd_stderr		=> 'cmd_stderr',
-				cmd_error		=> 'cmd_error',
+				_start				=> '_start',
+				_stop				=> '_stop',
+				_write_log			=> '_write_log',
+				register			=> 'register',
+				unregister			=> 'unregister',
+				notify				=> 'notify',
+				accept				=> 'accept',
+				accept_error		=> 'accept_error',
+				signals				=> 'signals',
+				_bw_limit			=> '_bw_limit',
+				_dcon_cleanup		=> '_dcon_cleanup',
+				virus_check_error	=> 'virus_check_error',
+				virus_check_done	=> 'virus_check_done',
+				virus_check_stdout	=> 'virus_check_stdout',
+				virus_check_stderr	=> 'virus_check_stderr',
 			}
 		],
 	);
@@ -67,9 +74,9 @@ sub spawn {
 sub _start {
 	my ($kernel, $session, $heap) = @_[KERNEL, SESSION, HEAP];
 	%{$heap->{params}} = %{ $_[ARG0] };
-	
+
 	$heap->{_main_pid} = $$;
-	
+
 	$session->option( @{$heap->{params}{'SessionOptions'}} ) if $heap->{params}{'SessionOptions'};
 	$kernel->alias_set($heap->{params}{'Alias'});
 
@@ -83,7 +90,7 @@ sub _start {
 		SuccessEvent   => 'accept',       # generating this event on connection
 		FailureEvent   => 'accept_error'  # generating this event on error
 	);
-	
+
 	$kernel->call($session->ID => _write_log => { v => 2, msg => "Listening to port $heap->{params}{ListenPort} on all interfaces." });
 }
 
@@ -92,74 +99,69 @@ sub _stop {
 	$kernel->call($session->ID => _write_log => { v => 2, msg => "Server stopped." });
 }
 
+sub register {
+    my($kernel, $heap, $sender) = @_[KERNEL, HEAP, SENDER];
+    $kernel->refcount_increment($sender->ID, __PACKAGE__);
+    $heap->{listeners}->{$sender->ID} = 1;
+    $kernel->post($sender->ID => ftpd_registered => $_[SESSION]->ID);
+}
+
+sub unregister {
+    my($kernel, $heap, $sender) = @_[KERNEL, HEAP, SENDER];
+    $kernel->refcount_decrement($sender->ID, __PACKAGE__);
+    delete $heap->{listeners}->{$sender->ID};
+}
+
+sub notify {
+    my($kernel, $heap, $sender, $name, $data) = @_[KERNEL, HEAP, SENDER, ARG0, ARG1];
+    $data->{con_session} = $sender unless(exists($data->{con_session}));
+	my $ret = 0;
+	foreach (keys %{$heap->{listeners}}) {
+    	my $tmp = $kernel->call($_ => $name => $data);
+		if (defined($tmp)) {
+			$ret += $tmp;
+		}
+#		print STDERR "ret is $ret for $name\n";
+	}
+	return ($ret > 0) ? 1 : 0;
+}
+
 # Accept a new connection
 
 sub accept {
-	my ($kernel, $heap, $session, $accepted_handle, $peer_addr, $peer_port) = @_[KERNEL, HEAP, SESSION, ARG0, ARG1, ARG2];
+	my ($kernel, $heap, $session, $accept_handle, $peer_addr, $peer_port) = @_[KERNEL, HEAP, SESSION, ARG0, ARG1, ARG2];
 
 	$peer_addr = inet_ntoa($peer_addr);
-	my $ip = inet_ntoa((sockaddr_in(getsockname($accepted_handle)))[1]);
-	my $listen_ip = (defined $heap->{params}{FirewallIP}) ? $heap->{params}{FirewallIP} : $ip;
-	 
-	$kernel->call($session->ID => _write_log => { v => 2, msg => "Server received connection on $listen_ip from $peer_addr : $peer_port" });
+	my ($port, $ip) = (sockaddr_in(getsockname($accept_handle)));
+	$ip = inet_ntoa($ip);
+	my $report_ip = (defined $heap->{params}{FirewallIP}) ? $heap->{params}{FirewallIP} : $ip;
+
+	$kernel->call($session->ID => _write_log => { v => 2, msg => "Server received connection on $report_ip ($ip:$port) from $peer_addr : $peer_port" });
 
 	my $opt = { %{$heap->{params}} };
-	$opt->{Handle} = $accepted_handle;
-	$opt->{ListenIP} = $ip;
+	$opt->{Handle} = $accept_handle;
+	$opt->{ListenIP} = $report_ip;
 	$opt->{PeerAddr} = $peer_addr;
 	$opt->{PeerPort} = $peer_port;
 
-	POE::Component::Server::FTP::ControlSession->new($opt);
-	
-#	$heap->{control_session} = POE::Wheel::Run->new(
-#		Program     => sub {
-#			my $raw;
-#			my $size   = 4096;
-#			#my $filter = POE::Filter::Reference->new();
-#			my $filter = POE::Filter::Line->new();
-#			
-#			POE::Component::Server::FTP::ControlSession->new($opt);
-#			
-#			#
-#			# POE::Filter::Reference does buffering so that you don't have to.
-#			#
-#			READ: while (sysread( STDIN, $raw, $size )) {
-#				my $s = $filter->get( [$raw] );
-#				
-#				#
-#				# It is possible that $filter->get() has returned more than one
-#				# structure from the parent process.  Each $t represents whatever
-#				# was pushed from the parent.
-#				#
-#				foreach my $t (@$s) {
-#					print "-$t\n";
-#					#
-#					# Here is a stand-in for something that might be doing
-#					# real work.
-#					#
-#					#$t->{fubar} = 'mycmd';
-#					
-#					#
-#					# this part re-freezes the data structure and writes
-#					# it back to the parent process.
-#					#
-#					#my $u = $filter->put( [$t] );
-#					#print STDOUT @$u;
-#					
-#					#
-#					# this is the exit condition.
-#					#
-#					last READ if ( $t->{'cmd'} eq 'shutdown' );
-#				}	
-#			}
-#		},
-#		ErrorEvent  => 'cmd_error',
-#		StdoutEvent => 'cmd_stdout',
-#		StderrEvent => 'cmd_stderr',
-#		StdinFilter => POE::Filter::Line->new(),
-#		#StdioFilter => POE::Filter::Reference->new(),
-#		#StdinFilter => POE::Filter::Reference->new(),
-#	) or die "$0: can't POE::Wheel::Run->new";
+	$opt->{LocalIP} = $ip;
+	$opt->{LocalPort} = $port;
+	$opt->{ReportIP} = $report_ip;
+
+	unless ($kernel->call($session->ID, notify => ftpd_accept => {
+			session => $session,
+			handle => $accept_handle,
+			report_ip => $report_ip,
+			local_ip => $ip,
+			local_port => $port,
+			peer_addr => $peer_addr,
+			peer_port => $peer_port,
+		})) {
+			close($accept_handle);
+			return 0;
+	}
+
+	POE::Component::Server::FTP::ControlSession->new($opt);	
 }
 
 sub _bw_limit {
@@ -172,35 +174,8 @@ sub _bw_limit {
 
 sub _dcon_cleanup {
     my ($kernel, $heap, $session, $type, $ip, $sid) = @_[KERNEL, HEAP, SESSION, ARG0, ARG1, ARG2];
-	$kernel->call($session->ID => _write_log => { v => 4, msg => "cleaing up $type limiter for $ip ($sid)" });
+	$kernel->call($session->ID => _write_log => { v => 4, msg => "cleaing up $type limiter for $ip (session $sid)" });
 	delete $heap->{$type}{$ip}{$sid};
-}
-
-sub cmd_error {
-    my ( $heap, $op, $code, $handle ) = @_[ HEAP, ARG0, ARG1, ARG4 ];
-
-    if ( $op eq 'read' and $code == 0 and $handle eq 'STDOUT' ) {
-        warn "child has closed output";
-        delete $heap->{control_session};
-    }
-}
-
-#
-# demonstrate that something is happening.
-#
-sub cmd_stdout {
-    my ( $heap, $txt ) = @_[ HEAP, ARG0 ];
-
-    print STDERR join ":", 'cmd_stdout ', $txt, "\n";
-
-}
-
-#
-# Just so that we can see what the child writes on errors.
-#
-sub cmd_stderr {
-    my ( $heap, $txt ) = @_[ HEAP, ARG0 ];
-    print STDERR "cmd_stderr: $txt\n";
 }
 
 # Handle an error in connection acceptance
@@ -208,6 +183,7 @@ sub cmd_stderr {
 sub accept_error {
 	my ($kernel, $session, $operation, $errnum, $errstr) = @_[KERNEL, SESSION, ARG0, ARG1, ARG2];
 	$kernel->call($session->ID => write_log => { v => 1, msg => "Server encountered $operation error $errnum: $errstr" });
+	$kernel->call($session->ID, notify => accept_error => { session => $session, operation => $operation, error_num => $errnum, err_str => $errstr });
 }
 
 # Handle incoming signals (INT)
@@ -221,20 +197,67 @@ sub signals {
 	if ($signal_name eq 'INT') {
 		#$_[KERNEL]->sig_handled();
 	}
-	
+
 	return 0;
 }
 
 sub _write_log {
 	my ($kernel, $session, $heap, $sender, $o) = @_[KERNEL, SESSION, HEAP, SENDER, ARG0];
 	if ($o->{v} <= $heap->{params}{'LogLevel'}) {
-		my $datetime = localtime();
+#		my $datetime = localtime();
 		my $sender = (defined $o->{sid}) ? $o->{sid} : $sender->ID;
 		my $type = (defined $o->{type}) ? $o->{type} : 'M';
-		print STDERR "[$datetime][$type$sender] $o->{msg}\n";
+#		print "[$datetime][$type$sender] $o->{msg}\n";
+		$kernel->call($session->ID, notify => ftpd_write_log => {
+			sender => $sender,
+			type => $type,
+			msg => $o->{msg},
+			data => $o,
+		});
 	}
 }
 
+# TODO finish this, and change it to post processor
+
+sub virus_check {
+	my ($kernel, $session, $heap, $sender, $o) = @_[KERNEL, SESSION, HEAP, SENDER, ARG0];
+
+	if (exists($heap->{viruscheck_wheel})) {
+		# try again later, 1 at a time!
+		$kernel->delay_set(virus_check => 15 => splice(@_,ARG0));
+		return;
+	}
+
+	my $params = $heap->{params}{'VirusCheckerParams'} || [];
+
+	$heap->{viruscheck_wheel} = POE::Wheel::Run->new(
+		Program     => $heap->{params}{'VirusCheckerCmd'},
+		ProgramArgs => $params,						# Parameters for $program.
+		ErrorEvent  => 'virus_check_error',			# Event to emit on errors.
+		CloseEvent  => 'virus_check_done',			# Child closed all output.
+		StdoutEvent => 'virus_check_stdout',		# Event to emit with child stdout information.
+		StderrEvent => 'virus_check_stderr',		# Event to emit with child stderr information.
+		StdoutFilter => POE::Filter::Line->new(),	# Child output as lines.
+		StderrFilter => POE::Filter::Line->new(),	# Child errors are lines.
+	);
+
+}
+
+sub virus_check_error {
+	print "error: $_[ARG0]";
+}
+
+sub virus_check_done {
+	print "done: $_[ARG0]";
+}
+
+sub virus_check_stdout {
+	print "stdout: $_[ARG0]";
+}
+
+sub virus_check_stderr {
+	print "stderr: $_[ARG0]";
+}
 
 1;
 __END__
@@ -253,7 +276,7 @@ POE::Component::Server::FTP - Event-based FTP server on a virtual filesystem
 		ListenPort      => 2112,				# port to listen on
 		Domain			=> 'blah.net',			# domain shown on connection
 		Version			=> 'ftpd v1.0',			# shown on connection, you can mimic...
-		AnonymousLogin	=> 'allow',				# deny, allow
+		AnonymousLogin	=> 'deny',				# deny, allow
 		FilesystemClass => 'Filesys::Virtual::Plain', # Currently the only one available
 		FilesystemArgs  => {
 			'root_path' => '/',					# This is actual root for all paths
@@ -264,7 +287,7 @@ POE::Component::Server::FTP - Event-based FTP server on a virtual filesystem
 		DownloadLimit	=> (50 * 1024),			# 50 kb/s per ip/connection (use LimitSceme to configure)
 		UploadLimit		=> (100 * 1024),		# 100 kb/s per ip/connection (use LimitSceme to configure)
 		LimitSceme		=> 'ip',				# ip or per (connection)
-		
+
 		LogLevel		=> 4,					# 4=debug, 3=less info, 2=quiet, 1=really quiet
 		TimeOut			=> 120,					# Connection Timeout
 	);

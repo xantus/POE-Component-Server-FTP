@@ -42,6 +42,8 @@ sub new {
 				_child		=> '_child',
 				_reset_timeout => '_reset_timeout',
 				_write_log	=> '_write_log',
+				_write_log_error => '_write_log_error',
+				send		=> 'send',
 				time_out	=> 'time_out',
 				receive		=> 'receive',
 				flushed		=> 'flushed',
@@ -135,13 +137,25 @@ sub _start {
 		$kernel->call($session->ID => _write_log => 4 => "Timeout set: id ".$heap->{time_out});
 	}
 	
+ 	$kernel->call($heap->{params}{'Alias'} => notify =>
+		'ftpd_connected' => {
+			session => $session,
+			report_ip => $opt->{ReportIP},
+			local_ip => $opt->{LocalIP},
+			local_port => $opt->{LocalPort},
+			peer_addr => $opt->{PeerAddr},
+			peer_port => $opt->{PeerPort},
+		}
+	);
+	
 	$kernel->call($session->ID => _write_log => 4 => "Control session started for $heap->{host} : $heap->{port}");
 
-	$heap->{control}->put("220 $opt->{Domain} FTP server ($opt->{Version} ".localtime()." ready.)");
+	$kernel->yield(send => "220 $opt->{Domain} FTP server ($opt->{Version} ".localtime()." ready.)");
 }
 
 sub _stop {
 	my ($kernel, $heap, $session) = @_[KERNEL, HEAP, SESSION];
+ 	$kernel->call($heap->{params}{'Alias'} => notify => 'ftpd_disconnected' => { session => $session });
 	$kernel->call($session->ID => _write_log => 4 => "Client session ended with $heap->{host} : $heap->{port}");
 }
 
@@ -149,11 +163,13 @@ sub _child {
 	my ($kernel, $heap, $session, $action, $child) = @_[KERNEL, HEAP, SESSION, ARG0, ARG1];
 
 	if ($action eq 'create') {
+ 		$kernel->call($heap->{params}{'Alias'} => notify => 'ftpd_dcon_create' => { dcon_session => $child });
 		$kernel->call($session->ID => _write_log => 4 => "child session created ".$child->ID);
 		$heap->{pending_session} = $child;
 	} elsif ($action eq 'lose') {
+ 		$kernel->call($heap->{params}{'Alias'} => notify => 'ftpd_dcon_destroy' => { dcon_session => $child });
 		$kernel->call($session->ID => _write_log => 3 => sprintf("Transfer complete %d kB/s of %d bytes",($child->get_heap->{bps}/1023),$child->get_heap->{total_bytes}));
-		$kernel->call($session->ID => _write_log => 4 => "child session lost ".$child->ID);
+		$kernel->call($session->ID => _write_log => 4 => "child lost (session ".$child->ID.")");
 		$kernel->call($session->ID => "_reset_timeout");
 		if ($heap->{params}{'LimitSceme'} eq 'ip') {
 			my $cheap = $child->get_heap;
@@ -162,12 +178,26 @@ sub _child {
 		if (defined $heap->{abor}) {
 			delete $heap->{abor};
 		} else {
-			$heap->{control}->put("226 Transfer complete.");
+			$kernel->yield(send => "226 Transfer complete.");
 		}
 		delete $heap->{pending_session};
 	}
 	
 	return 0;
+}
+
+sub send {
+	my ($kernel, $session, $heap, $txt) = @_[KERNEL, SESSION, HEAP, ARG0];
+	
+	if ($heap->{control}) {
+		$heap->{control}->put($txt);
+	}
+}
+
+sub _write_log_error {
+	my ($kernel, $session, $heap, $syscall_ret, $errno, $errtxt) = @_[KERNEL, SESSION, HEAP, ARG0, ARG1, ARG2];
+	
+	$kernel->call($session->ID => _write_log => 3 => "Error from forked process $syscall_ret ($errno) $errtxt");
 }
 
 sub time_out {
@@ -177,26 +207,27 @@ sub time_out {
 	# going on, reset the timer
 	if (defined $heap->{pending_session} &&
 			$heap->{params}{'TimeOut'} > 0) {
+		$kernel->call($heap->{params}{'Alias'} => notify => { event => 'ftpd_time_out', time_inactive => $heap->{params}{'TimeOut'},  });
 		$heap->{time_out} = $kernel->delay_set(time_out => $heap->{params}{'TimeOut'});
 		$kernel->call($session->ID => _write_log => 4 => "Timeout re-set: id ".$heap->{time_out});
 		return;
 	}
 	
 	unless ($heap->{control}) {
-		$kernel->alarm_remove_all( );
+		$kernel->alarm_remove_all();
 		delete $heap->{control};
 	}
 	
 	if ($heap->{auth} == 0) {
 		$kernel->call($session->ID => _write_log => 2 => "Session ".$session->ID." timed out before login (".$heap->{params}{'TimeOut'}.")");
-		$heap->{control}->put("421 Disconnecting you because you did't login before ".$heap->{params}{'TimeOut'}." seconds, Goodbye.");
+		$kernel->yield(send => "421 Disconnecting you because you did't login before ".$heap->{params}{'TimeOut'}." seconds, Goodbye.");
 	} else {
 		$kernel->call($session->ID => _write_log => 2 => "Session ".$session->ID." timed out (".$heap->{params}{'TimeOut'}.")");
-		$heap->{control}->put("421 Disconnecting you because you were inactive for ".$heap->{params}{'TimeOut'}." seconds, Goodbye.");
+		$kernel->yield(send => "421 Disconnecting you because you were inactive for ".$heap->{params}{'TimeOut'}." seconds, Goodbye.");
 	}
 	
-	$kernel->alarm_remove_all( );
-	delete $heap->{control};
+	$kernel->alarm_remove_all();
+	$heap->{shutdown_on_flush} = 1;
 }
 
 sub receive {
@@ -218,19 +249,25 @@ sub error {
 	} else {
 		$kernel->call($session->ID => _write_log => 4 => "Client at $heap->{host} : $heap->{port} disconnected");
 	}
+ 	
+	$kernel->call($heap->{params}{'Alias'} => notify => 'ftpd_disconnected' => { session => $session });
 
 	# either way, stop this session
-	$kernel->alarm_remove_all( );
+	$kernel->alarm_remove_all();
 	delete $heap->{control};
 }
 
 sub flushed {
 	my ($kernel, $heap) = @_[KERNEL, HEAP];
-	
-	if (defined $heap->{pending_session} && $heap->{listening} == 0) {
+
+	if ($heap->{shutdown_on_flush}) {
+		delete $heap->{control};
+	}
+
+#	if (defined $heap->{pending_session} && $heap->{listening} == 0) {
 # this broke stuff, now execute is yielded another way
 #		$kernel->post($heap->{pending_session}->ID, 'execute');
-	}
+#	}
 }
 
 
@@ -246,7 +283,7 @@ sub SITE {
 	my ($kernel, $heap, $session, $args) = @_[KERNEL, HEAP, SESSION, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 	} else {
 		my $cmd = shift(@$args);
 		$kernel->call($session->ID,$cmd,$args);
@@ -257,28 +294,33 @@ sub NOOP {
 	my ($kernel, $heap, $session, $args) = @_[KERNEL, HEAP, SESSION, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 	} else {
 		# resetting the timeout is done in receive()
-		$heap->{control}->put("200 No-op okay.");
+		$kernel->yield(send => "200 No-op okay.");
 	}
 }
 
 sub XSEN {
 	my ($kernel, $heap, $session, $args) = @_[KERNEL, HEAP, SESSION, ARG0];
 	
-	# TODO send a message to the terminal
-	#$args = join(' ',@$args);
+	$args = join(' ',@$args);
 	
-	$heap->{control}->put("453 Not Allowed");
+	$kernel->call($session->ID => _write_log => 1 => "Message to admin: $args");
+	
+ 	my $ret = $kernel->call($heap->{params}{'Alias'} => notify => 'ftpd_xsen' => { message => $args });
+	
+	if (!defined $ret) {
+		$kernel->yield(send => "453 Not Allowed");
+	}
 }
 
 sub QUIT {
 	my ($kernel, $heap, $session, $args) = @_[KERNEL, HEAP, SESSION, ARG0];
 
 	$kernel->alarm_remove_all( );
-	$heap->{control}->put("221 Goodbye.");
-	delete $heap->{control};
+	$kernel->yield(send => "221 Goodbye.");
+	$heap->{shutdown_on_flush} = 1;
 }
 
 sub USER {
@@ -288,10 +330,10 @@ sub USER {
 	$heap->{username} = $username;
 
 	if ($username eq "anonymous") {
-		$heap->{control}->put("331 Guest login ok, send your complete ".
+		$kernel->yield(send => "331 Guest login ok, send your complete ".
 							  "e-mail address as password.");
 	} else {
-		$heap->{control}->put("331 Password required for $username");
+		$kernel->yield(send => "331 Password required for $username");
 	}
 }
 
@@ -304,24 +346,49 @@ sub PASS {
 
 	if (exists($heap->{username})) {
 		if ($heap->{params}{AnonymousLogin} eq 'deny' && $heap->{username} eq 'anonymous') {
+ 			$kernel->call($heap->{params}{'Alias'} => notify =>
+				'ftpd_incorrect_login' => {
+					session => $session,
+					username => $heap->{username},
+					password => $password,
+					anonymous => 'deny',
+				}
+			);
 			$kernel->call($session->ID => _write_log => 1 => "Anonymous login denied.");
-			$heap->{control}->put("530 Login incorrect.");
+			$kernel->yield(send => "530 Login incorrect.");
 			$heap->{auth} = 0;
 			return;
 		}
 		if ($fs->login($heap->{username}, $password)) {
+ 			$kernel->call($heap->{params}{'Alias'} => notify =>
+				'ftpd_login' => {
+					session => $session,
+					username => $heap->{username},
+					password => $password,
+					uid => $fs->{uid},
+					gid => $fs->{gid},
+					home => $fs->{home},
+				}
+			);
 			$kernel->call($session->ID => _write_log => 1 => "User $heap->{username} logged in.");
 			# MOTD?
-			$heap->{control}->put("230 Logged in.");
+			$kernel->yield(send => "230 Logged in.");
 			$heap->{auth} = 1;
 			$kernel->call($session->ID => "_reset_timeout");
 		} else {
+ 			$kernel->call($heap->{params}{'Alias'} => notify =>
+				'ftpd_incorrect_login' => {
+					session => $session,
+					username => $heap->{username},
+					password => $password,
+				}
+			);
 			$kernel->call($session->ID => _write_log => 1 => "Incorrect login");
-			$heap->{control}->put("530 Login incorrect.");
+			$kernel->yield(send => "530 Login incorrect.");
 			$heap->{auth} = 0;
 		}
 	} else {
-		$heap->{control}->put("503 Login with USER first.");
+		$kernel->yield(send => "503 Login with USER first.");
 	}
 }
 
@@ -330,13 +397,13 @@ sub REST {
 	my ($kernel, $session, $heap, $args) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
 	if ($args->[0] =~ m/^\d+$/) {
 		$heap->{rest} = $args->[0];
-		$heap->{control}->put("350 Will attempt to restart at postion $args->[0].");
+		$kernel->yield(send => "350 Will attempt to restart at postion $args->[0].");
 	} else {
 		
 	}
@@ -347,13 +414,13 @@ sub TYPE {
 	my ($kernel, $session, $heap, $type) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
 	$type = $type->[0];
 		
-	$heap->{control}->put("200 Type set to I.");
+	$kernel->yield(send => "200 Type set to I.");
 }
 
 # Not implemented.
@@ -361,18 +428,18 @@ sub SYST {
 	my ($kernel, $session, $heap) = @_[KERNEL, SESSION, HEAP];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
-	$heap->{control}->put("215 UNIX Type: L8");
+	$kernel->yield(send => "215 UNIX Type: L8");
 }
 
 sub ABOR {
 	my ($kernel, $session, $heap) = @_[KERNEL, SESSION, HEAP];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
@@ -382,7 +449,7 @@ sub ABOR {
 		$heap->{abor} = 1;
 	}
 	
-	$heap->{control}->put("200 ABOR successfull");
+	$kernel->yield(send => "200 ABOR successfull");
 	# TODO what do i send?
 }
 
@@ -390,7 +457,7 @@ sub MDTM {
 	my ($kernel, $session, $heap, $fn) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
@@ -398,9 +465,9 @@ sub MDTM {
 	my $fs = $heap->{filesystem};
 	my @modtime = $fs->modtime($fs);
 	if ($modtime[0] == 0) {
-		$heap->{control}->put("550 MDTM $fn: Permission denied.");
+		$kernel->yield(send => "550 MDTM $fn: Permission denied.");
 	} else {
-		$heap->{control}->put("213 ".$modtime[1]);
+		$kernel->yield(send => "213 ".$modtime[1]);
 	}
 }
 
@@ -408,20 +475,20 @@ sub SIZE {
 	my ($kernel, $session, $heap, $fn) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
 	$fn = join(' ',@$fn);
 	my $fs = $heap->{filesystem};
 	my $size = $fs->size($fs);
-	$heap->{control}->put("213 ".$size);
+	$kernel->yield(send => "213 ".$size);
 	
 #	my @modtime = $fs->modtime($fs);
 #	if ($modtime[0] == 0) {
-#		$heap->{control}->put("550 SIZE $fn: Permission denied.");
+#		$kernel->yield(send => "550 SIZE $fn: Permission denied.");
 #	} else {
-#		$heap->{control}->put("213 ".$modtime[1]);
+#		$kernel->yield(send => "213 ".$modtime[1]);
 #	}
 }
 
@@ -429,36 +496,37 @@ sub CHMOD {
 	my ($kernel, $session, $heap, $fn) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
-	
+
+	my $fs = $heap->{filesystem};
 	my $mode = shift(@$fn);
 	$fn = join(' ',@$fn);
-	my $fs = $heap->{filesystem};
 
 	if ($fs->chmod($mode, $fn)) {
-		$heap->{control}->put("200 CHMOD command successful.");
+		$kernel->yield(send => "200 CHMOD command successful.");
 	} else {
-		$heap->{control}->put("550 CHMOD command unsuccessful");
+		$kernel->yield(send => "550 CHMOD command unsuccessful");
 	}
+
 }
 
 sub DELE {
 	my ($kernel, $session, $heap, $fn) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
 	$fn = join(' ',@$fn);
 	my $fs = $heap->{filesystem};
-
+	
 	if ($fs->delete($fn)) {
-		$heap->{control}->put("250 DELE command successful");
+		$kernel->yield(send => "250 DELE command successful");
 	} else {
-		$heap->{control}->put("550 DELE command unsuccessful");
+		$kernel->yield(send => "550 DELE command unsuccessful");
 	}
 }
 
@@ -466,7 +534,7 @@ sub MKD	{
 	my ($kernel, $session, $heap, $fn) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
@@ -474,45 +542,49 @@ sub MKD	{
 	my $fs = $heap->{filesystem};
 	
 	my $ret = $fs->mkdir($fn);
+	
 	if ($ret == 1) {
 		$fn =~ s/"/""/g; # doublequoting
-		$heap->{control}->put("257 \"$fn\" directory created");
+		$kernel->yield(send => "257 \"$fn\" directory created");
 	} elsif ($ret == 2) {
 		$fn =~ s/"/""/g; # doublequoting
-		$heap->{control}->put("521 \"$fn\" directory already exists");
+		$kernel->yield(send => "521 \"$fn\" directory already exists");
 	} else {
-		$heap->{control}->put("550 MKDIR $fn: Permission denied.");
+		$kernel->yield(send => "550 MKDIR $fn: Permission denied.");
 	}
+	
 }
 
 sub XMKD {
 	my ($kernel, $session, $heap, $fn) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
-	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
-		return;
-	}
-	
-	$fn = join(' ',@$fn);
-	my $fs = $heap->{filesystem};
-	
-	my $ret = $fs->mkdir($fn);
-	if ($ret == 1) {
-		$fn =~ s/"/""/g; # doublequoting
-		$heap->{control}->put("257 \"$fn\" directory created");
-	} elsif ($ret == 2) {
-		$fn =~ s/"/""/g; # doublequoting
-		$heap->{control}->put("521 \"$fn\" directory already exists");
-	} else {
-		$heap->{control}->put("550 MKDIR $fn: Permission denied.");
-	}
+	$kernel->call($session->ID => MKD => splice(@_,ARG0));
+
+#	if ($heap->{auth} == 0) {
+#		$kernel->yield(send => "530 Not logged in");
+#		return;
+#	}	
+#
+#	$fn = join(' ',@$fn);
+#	my $fs = $heap->{filesystem};
+#	
+#	my $ret = $fs->mkdir($fn);
+#	if ($ret == 1) {
+#		$fn =~ s/"/""/g; # doublequoting
+#		$kernel->yield(send => "257 \"$fn\" directory created");
+#	} elsif ($ret == 2) {
+#		$fn =~ s/"/""/g; # doublequoting
+#		$kernel->yield(send => "521 \"$fn\" directory already exists");
+#	} else {
+#		$kernel->yield(send => "550 MKDIR $fn: Permission denied.");
+#	}
 }
 
 sub RMD {
 	my ($kernel, $session, $heap, $fn) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
@@ -520,75 +592,81 @@ sub RMD {
 	my $fs = $heap->{filesystem};
 
 	if ($fs->rmdir($fn)) {
-		$heap->{control}->put("250 RMD command successful");
+		$kernel->yield(send => "250 RMD command successful");
 	} else {
-		$heap->{control}->put("550 RMD $fn: Permission denied");
+		$kernel->yield(send => "550 RMD $fn: Permission denied");
 	}
 }
 
 sub XRMD {
 	my ($kernel, $session, $heap, $fn) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
-	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
-		return;
-	}
+	$kernel->call($session->ID => RMD => splice(@_,ARG0));
 	
-	$fn = join(' ',@$fn);
-	my $fs = $heap->{filesystem};
-
-	if ($fs->rmdir($fs->cwd().$fn)) {
-		$heap->{control}->put("250 RMD command successful");
-	} else {
-		$heap->{control}->put("550 RMD $fn: Permission denied");
-	}
+#	if ($heap->{auth} == 0) {
+#		$kernel->yield(send => "530 Not logged in");
+#		return;
+#	}
+#	
+#	
+#	$fn = join(' ',@$fn);
+#	my $fs = $heap->{filesystem};
+#
+#	if ($fs->rmdir($fs->cwd().$fn)) {
+#		$kernel->yield(send => "250 RMD command successful");
+#	} else {
+#		$kernel->yield(send => "550 RMD $fn: Permission denied");
+#	}
 }
 
 sub CDUP {
 	my ($kernel, $session, $heap, $fn) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
 	$fn = join(' ',@$fn);
 	my $fs = $heap->{filesystem};
-
+	
 	if ($fs->chdir('..')) {
-		$heap->{control}->put('257 "'.$fs->cwd().'" is current directory.');
+		$kernel->yield(send => '257 "'.$fs->cwd().'" is current directory.');
 	} else {
-		$heap->{control}->put("550 ..: No such file or directory.");
+		$kernel->yield(send => "550 ..: No such file or directory.");
 	}
+
 }
 
 sub CWD {
 	my ($kernel, $session, $heap, $fn) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
-	} else {
-		$fn = join(' ',@$fn);
-		my $fs = $heap->{filesystem};
-
-		if ($fs->chdir($fn)) {
-			$heap->{control}->put('257 "'.$fs->cwd().'" is current directory.');
-		} else {
-			$heap->{control}->put("550 $fn: No such file or directory.");
-		}
+		$kernel->yield(send => "530 Not logged in");
+		return;
 	}
+	
+	$fn = join(' ',@$fn);
+	my $fs = $heap->{filesystem};
+	
+	if ($fs->chdir($fn)) {
+		$kernel->yield(send => '257 "'.$fs->cwd().'" is current directory.');
+	} else {
+		$kernel->yield(send => "550 $fn: No such file or directory.");
+	}
+	
 }
 
 sub PWD {
 	my ($kernel, $session, $heap, $fn) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 	} else {
 		$fn = join(' ',@$fn);
 		my $fs = $heap->{filesystem};
 
-		$heap->{control}->put('257 "'.$fs->cwd().'" is current directory.');
+		$kernel->yield(send => '257 "'.$fs->cwd().'" is current directory.');
 	}
 }
 
@@ -596,25 +674,12 @@ sub PORT {
 	my ($kernel, $session, $heap, $data_port) = @_[KERNEL, SESSION, HEAP, ARG0];
 
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
-	$data_port = join(' ',@$data_port);
-	
-	### Planning to use a Wheel here...
-
-#	$heap->{control} = POE::Wheel::ReadWrite->new(
-#			 Handle       => $handle,                # on this handle
-#			 Driver       => new POE::Driver::SysRW, # using sysread and syswrite
-#			 Filter       => new POE::Filter::FTPd::Control,
-#			 InputEvent	=> 'receive',        # generating this event for requests
-#			 ErrorEvent   => 'error',          # generating this event for errors
-#			 FlushedEvent => 'flushed',        # generating this event for all-sent
-#			);
-
-	$heap->{last_port_cmd} = $data_port;
-	$heap->{control}->put("200 PORT command successful.");
+	$heap->{last_port_cmd} = $data_port->[0];
+	$kernel->yield(send => "200 PORT command successful.");
 
 	$heap->{pasv} = 0;
 }
@@ -623,7 +688,7 @@ sub PASV {
 	my ($kernel, $session, $heap, $data_port) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
@@ -641,21 +706,20 @@ sub PASV {
 	$heap->{pasv} = 1;
 	my $ip = $heap->{params}{ListenIP};
 	$ip =~ s/\./,/g;
-	print STDERR "ip is $ip\n";
-	$heap->{control}->put("227 Entering Passive Mode. ($ip,$p1,$p2)");
+	$kernel->yield(send => "227 Entering Passive Mode. ($ip,$p1,$p2)");
 }
 
 sub LIST {
 	my ($kernel, $session, $heap, $dirfile) = @_[KERNEL, SESSION, HEAP, ARG0];
 
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 
 	$dirfile = join(' ',@$dirfile);
 
-	$heap->{control}->put("150 Opening ASCII mode data connection for /bin/ls.");
+	$kernel->yield(send => "150 Opening ASCII mode data connection for /bin/ls.");
 
 	if (defined $heap->{pending_session} && $heap->{pasv} == 1) {
 		$kernel->post($heap->{pending_session}->ID => start_LIST => $dirfile);
@@ -671,16 +735,16 @@ sub LIST {
 }
 
 sub NLST {
-my ($kernel, $session, $heap, $dirfile) = @_[KERNEL, SESSION, HEAP, ARG0];
+	my ($kernel, $session, $heap, $dirfile) = @_[KERNEL, SESSION, HEAP, ARG0];
 
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 
 	$dirfile = join(' ',@$dirfile);
 
-	$heap->{control}->put("150 Opening ASCII mode data connection for /bin/ls.");
+	$kernel->yield(send => "150 Opening ASCII mode data connection for /bin/ls.");
 
 	if (defined $heap->{pending_session} && $heap->{pasv} == 1) {
 		$kernel->post($heap->{pending_session}->ID => start_NLST => $dirfile);
@@ -698,7 +762,7 @@ sub STOR {
 	my ($kernel, $session, $heap, $filename) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
@@ -707,12 +771,13 @@ sub STOR {
 	my $fh;
 
 	if ($fh = $fs->open_write($filename)) {
-		$heap->{control}->put("150 Opening BINARY mode data connection for $filename.");
+		$kernel->yield(send => "150 Opening BINARY mode data connection for $filename.");
 
 		if (defined $heap->{pending_session} && $heap->{pasv} == 1) {
 			$kernel->post($heap->{pending_session}->ID => start_STOR => $fh,
 			{
 				rest => $heap->{rest},
+				filename => $filename,
 			});
 		} else {
 			POE::Component::Server::FTP::DataSession->new($heap->{params},{
@@ -721,11 +786,12 @@ sub STOR {
 				cmd => 'STOR',
 				opt => $fh,
 				rest => $heap->{rest},
+				filename => $filename,
 			});
 		}
 
 	} else {
-		$heap->{control}->put("553 Permission denied: $filename.");
+		$kernel->yield(send => "553 Permission denied: $filename.");
 	}
 }
 
@@ -733,7 +799,7 @@ sub APPE {
 	my ($kernel, $session, $heap, $filename) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
@@ -743,21 +809,25 @@ sub APPE {
 
 	# the ,1 flag is for append
 	if ($fh = $fs->open_write($filename,1)) {
-		$heap->{control}->put("150 Opening BINARY mode data connection for $filename.");
+		$kernel->yield(send => "150 Opening BINARY mode data connection for $filename.");
 
 		if (defined $heap->{pending_session} && $heap->{pasv} == 1) {
-			$kernel->post($heap->{pending_session}->ID => start_STOR => $fh);
+			$kernel->post($heap->{pending_session}->ID => start_STOR => $fh,
+			{
+				filename => $filename,
+			});
 		} else {
 			POE::Component::Server::FTP::DataSession->new($heap->{params},{
 				fs => $fs,
 				data_port => $heap->{last_port_cmd},
 				cmd => 'STOR',
 				opt => $fh,
+				filename => $filename,
 			});
 		}
 
 	} else {
-		$heap->{control}->put("553 Permission denied: $filename.");
+		$kernel->yield(send => "553 Permission denied: $filename.");
 	}
 }
 
@@ -765,7 +835,7 @@ sub RETR {
 	my ($kernel, $session, $heap, $filename) = @_[KERNEL, SESSION, HEAP, ARG0];
 	
 	if ($heap->{auth} == 0) {
-		$heap->{control}->put("530 Not logged in");
+		$kernel->yield(send => "530 Not logged in");
 		return;
 	}
 	
@@ -774,11 +844,12 @@ sub RETR {
 	my $fh;
 
 	if ($fh = $fs->open_read($filename)) {
-		$heap->{control}->put("150 Opening BINARY mode data connection for $filename.");
+		$kernel->yield(send => "150 Opening BINARY mode data connection for $filename.");
 		if (defined $heap->{pending_session} && $heap->{pasv} == 1) {
 			$kernel->post($heap->{pending_session}->ID => start_RETR => $fh,
 			{
 				rest => $heap->{rest},
+				filename => $filename,
 			});
 		} else {
 			POE::Component::Server::FTP::DataSession->new($heap->{params},{
@@ -787,10 +858,11 @@ sub RETR {
 				cmd => 'RETR',
 				opt => $fh,
 				rest => $heap->{rest},
+				filename => $filename,
 			});
 		}
 	} else {
-		$heap->{control}->put("550 No such file or directory: $filename.");
+		$kernel->yield(send => "550 No such file or directory: $filename.");
 	}
 }
 
@@ -802,7 +874,7 @@ sub _default {
 	} else {
 		$kernel->call($session->ID => _write_log => 4 => "UNSUPPORTED COMMAND: $cmd(".join(", ", @$args).")");
 
-		$heap->{control}->put("500 '$cmd': command not understood");
+		$kernel->yield(send => "500 '$cmd': command not understood");
 	}
 	
 	return 0;
@@ -819,15 +891,15 @@ sub _reset_timeout {
 sub _write_log {
 	my ($kernel, $session, $heap, $sender, $verbose, $msg) = @_[KERNEL, SESSION, HEAP, SENDER, ARG0, ARG1];
 	if ($verbose <= $heap->{params}{'LogLevel'}) {
-		# if we're not forking, then pass the logging off to the
+		# if we're not forked, then pass the logging off to the
 		# main session
-		if ($heap->{params}{_main_pid} == $$) {
-			$kernel->call($heap->{params}{'Alias'} => _write_log => { type => (($sender->ID == $session->ID) ? 'C' : 'D'), msg => $msg, v => $verbose });
-		} else {
-			my $datetime = localtime();
-			my $type = ($sender->ID == $session->ID) ? 'C' : 'D';
-			print STDERR "[$datetime][$type".$sender->ID."] $msg\n";
-		}
+		#if ($heap->{params}{_main_pid} == $$) {
+			$kernel->call($heap->{params}{'Alias'} => _write_log => { type => (($sender->ID == $session->ID) ? 'C' : 'D'), msg => $msg, v => $verbose, sid => $sender->ID });
+		#} else {
+			#my $datetime = localtime();
+			#my $type = ($sender->ID == $session->ID) ? 'C' : 'D';
+			#print STDERR "[$datetime][$type".$sender->ID."] $msg\n";
+		#}
 	}
 }
 
