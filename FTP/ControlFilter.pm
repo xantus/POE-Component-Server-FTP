@@ -3,7 +3,7 @@ package POE::Component::Server::FTP::ControlFilter;
 ######################################################################
 ### POE::Component::Server::FTP::ControlFilter
 ### L.M.Orchard (deus_x@pobox.com)
-### $Id$
+### Modified by David Davis ( xantus@cpan.org )
 ###
 ### TODO:
 ### --
@@ -12,6 +12,7 @@ package POE::Component::Server::FTP::ControlFilter;
 ### This module is free software; you can redistribute it and/or
 ### modify it under the same terms as Perl itself.#
 ###
+### Changes Copyright (c) 2003 David Davis and Teknikill Software
 ######################################################################
 
 use strict;

@@ -1,5 +1,8 @@
 Revision history for Perl extension POE::Component::Server::FTP.
 
+0.03 Thu Feb 5 23:32:45 2004
+	- oops, fixed hardcoded ip for pasv
+
 0.02 Thu Feb 5 22:15:16 2004
 	- (PASV) Passive transfers work
 	- Anonymous login allow/deny
@@ -7,7 +10,7 @@ Revision history for Perl extension POE::Component::Server::FTP.
 	- Cleaned up the code ALOT
 	- (ABOR) abort added
 	- (XMKD XRMD XPWD XCUP XCWD) added these commands, but they might
-	  not be tottaly rfc compliant
+	  not be totally rfc compliant
 	- Probably more...
 
 0.01 Sat Dec 1 15:19:32 2001

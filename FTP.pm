@@ -18,7 +18,7 @@ use strict;
 use warnings;
 
 our @ISA = qw(Exporter);
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 use Socket;
 use Carp;
@@ -85,10 +85,12 @@ sub accept {
 	my ($heap, $accepted_handle, $peer_addr, $peer_port) = @_[HEAP, ARG0, ARG1, ARG2];
 
 	$peer_addr = inet_ntoa($peer_addr);
-	DEBUG && print "Server received connection from $peer_addr : $peer_port\n";
+	my $ip = getsockname($accepted_handle);
+	DEBUG && print "Server received connection on $ip from $peer_addr : $peer_port\n";
 
 	my $opt = { %{$heap->{params}} };
 	$opt->{Handle} = $accepted_handle;
+	$opt->{ListenIP} = $ip;
 	$opt->{PeerAddr} = $peer_addr;
 	$opt->{PeerPort} = $peer_port;
 	POE::Component::Server::FTP::ControlSession->new($opt);

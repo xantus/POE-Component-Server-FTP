@@ -511,8 +511,9 @@ sub PASV {
 	});
 
 	$heap->{pasv} = 1;
-
-	$heap->{control}->put("227 Entering Passive Mode. (10,0,2,11,$p1,$p2)");
+	my $ip = $heap->{params}{ListenIP};
+	$ip =~ s/\./,/g;
+	$heap->{control}->put("227 Entering Passive Mode. ($ip,$p1,$p2)");
 }
 
 sub LIST {
