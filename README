@@ -1,10 +1,8 @@
 
 My name is David Davis and I've taken over POE::Component::Server::FTP
-and I hope to turn it into a full featured ftp server that could compete
-with other mainstream ftp servers out there.
 
 To get started quickly, install this module and Filesys::Virtual
 and use server.pl from the examples dir.
 
-*Use this ftp server at your own risk*
+*Use this ftp server at your own risk, if it breaks, you can keep both halves*
 

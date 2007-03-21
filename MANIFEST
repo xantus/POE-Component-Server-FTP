@@ -1,4 +1,5 @@
 README
+README_TOO
 Changes
 FTP.pm
 FTP/ControlFilter.pm
@@ -10,3 +11,4 @@ examples/server_manager.pl
 MANIFEST
 Makefile.PL
 t/01_require.t
+META.yml                                 Module meta-data (added by MakeMaker)

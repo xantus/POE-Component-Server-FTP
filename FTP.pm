@@ -21,7 +21,7 @@ use strict;
 use warnings;
 
 our @ISA = qw(Exporter);
-our $VERSION = '0.06';
+our $VERSION = '0.07';
 
 use Socket;
 use Carp;
@@ -42,7 +42,8 @@ sub spawn {
 	$params{'TimeOut'} = $params{'TimeOut'} || 0;
 	$params{'DownloadLimit'} = $params{'DownloadLimit'} || 0;
 	$params{'UploadLimit'} = $params{'UploadLimit'} || 0;
-	$params{'LimitSceme'} = $params{'LimitSceme'} || 'none';
+	$params{'LimitScheme'} = $params{'LimitSceme'};
+	$params{'LimitScheme'} = $params{'LimitScheme'} || 'none';
 
 	POE::Session->create(
 		#options => {trace=>1},
@@ -284,9 +285,9 @@ POE::Component::Server::FTP - Event-based FTP server on a virtual filesystem
 			'home_path' => '/home',				# Home directory for '~'
 		},
 		# use 0 to disable these Limits
-		DownloadLimit	=> (50 * 1024),			# 50 kb/s per ip/connection (use LimitSceme to configure)
-		UploadLimit		=> (100 * 1024),		# 100 kb/s per ip/connection (use LimitSceme to configure)
-		LimitSceme		=> 'ip',				# ip or per (connection)
+		DownloadLimit	=> (50 * 1024),			# 50 kb/s per ip/connection (use LimitScheme to configure)
+		UploadLimit		=> (100 * 1024),		# 100 kb/s per ip/connection (use LimitScheme to configure)
+		LimitScheme		=> 'ip',				# ip or per (connection)
 
 		LogLevel		=> 4,					# 4=debug, 3=less info, 2=quiet, 1=really quiet
 		TimeOut			=> 120,					# Connection Timeout

@@ -481,7 +481,7 @@ sub SIZE {
 	
 	$fn = join(' ',@$fn);
 	my $fs = $heap->{filesystem};
-	my $size = $fs->size($fs);
+	my $size = $fs->size($fn);
 	$kernel->yield(send => "213 ".$size);
 	
 #	my @modtime = $fs->modtime($fs);

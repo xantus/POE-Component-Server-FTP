@@ -21,9 +21,9 @@ POE::Session->create(
 				'home_path' => '/home',				# Home directory for '~'
 				},
 				# use 0 to disable these Limits
-				DownloadLimit	=> (50 * 1024),			# 50 kb/s per ip/connection (use LimitSceme to configure)
-				UploadLimit		=> (100 * 1024),		# 100 kb/s per ip/connection (use LimitSceme to configure)
-				LimitSceme		=> 'ip',				# ip or per (connection)
+				DownloadLimit	=> (50 * 1024),			# 50 kb/s per ip/connection (use LimitScheme to configure)
+				UploadLimit		=> (100 * 1024),		# 100 kb/s per ip/connection (use LimitScheme to configure)
+				LimitScheme		=> 'ip',				# ip or per (connection)
 				LogLevel		=> 4,					# 4=debug, 3=less info, 2=quiet, 1=really quiet
 				TimeOut			=> 120,					# Idle Timeout
 			);
