@@ -1,5 +1,10 @@
 Revision history for Perl extension POE::Component::Server::FTP.
 
+0.08 Fri Nov 09 2007
+    - "When connecting to the server and enabling passive mode, the port
+       returned to the client reports the upper 8 bits of the 2-byte port range
+       as a 16-bit number." -Eric Rybski, Thanks Eric!
+
 0.07 Wed Mar 21 2007
 	- Fixed typo in MDTM, and SIZE
     - Added prereq for POE

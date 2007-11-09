@@ -695,6 +695,7 @@ sub PASV {
 	my $p1 = int ((int rand(65430)) / 256)+1025;
 	my $p2 = (int rand(100))+1;
 	$p1 -= $p2;
+    $p1 &= 0xFF;
 
 	POE::Component::Server::FTP::DataSession->new($heap->{params},{
 		fs => $heap->{filesystem},
